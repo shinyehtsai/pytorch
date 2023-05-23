@@ -36,24 +36,19 @@ def _fold_bn_weights_into_conv_node(
     bn_node: Node,
     m: GraphModule
 ) -> None:
-    # conv weight
+    # conv args: input, weight, bias, stride, padding, dilation, transposed, ...
     conv_w = _get_tensor_constant_from_node(conv_weight_node, m)
-    # conv bias
     conv_b = _get_tensor_constant_from_node(conv_bias_node, m)
     transpose = conv_node.args[6]
 
+    # bn args: input, weight, bias, running mean, running var, training, momentum, eps
     bn_args_schema = bn_node.target._schema.arguments  # type: ignore[union-attr]
     bn_args = _get_all_arguments(bn_node.args, bn_node.kwargs, bn_args_schema)
-
-    # bn weight
     bn_w = _get_tensor_constant_from_node(bn_args[1], m)
-    # bn bias
     bn_b = _get_tensor_constant_from_node(bn_args[2], m)
-    # bn running mean
     bn_rm = _get_tensor_constant_from_node(bn_args[3], m)
-    # bn running variance
     bn_rv = _get_tensor_constant_from_node(bn_args[4], m)
-    bn_eps = bn_args[6]
+    bn_eps = bn_args[7]
 
     fused_weight, fused_bias = fuse_conv_bn_weights(conv_w, conv_b, bn_rm, bn_rv, bn_eps, bn_w, bn_b, transpose=transpose)
 

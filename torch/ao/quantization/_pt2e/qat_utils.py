@@ -1,6 +1,6 @@
 import copy
 import operator
-from typing import Any, Callable, Tuple
+from typing import Any, Callable, List, Tuple
 
 import torch
 from torch.fx import Graph, GraphModule, Node
@@ -241,6 +241,31 @@ def _no_conv_bias_filter(
     """
     return not _has_conv_bias_filter(match, original_graph, pattern_graph)
 
+def _get_conv_bn_getitem_nodes(nodes: List[Node]) -> Tuple[Node, Node, Node]:
+    """
+    Helper function to extract the conv, bn, and getitem nodes from the list.
+    This asserts that the list contains exactly one of each of the above nodes.
+
+    Return a 3-tuple of (conv node, bn node, getitem node).
+    """
+    conv_node, bn_node, getitem_node = None, None, None
+    for n in nodes:
+        if n.op != "call_function":
+            continue
+        if n.target == torch.ops.aten.convolution.default:
+            assert conv_node is None
+            conv_node = n
+        elif n.target == torch.ops.aten._native_batch_norm_legit.default:
+            assert bn_node is None
+            bn_node = n
+        elif n.target == operator.getitem:
+            assert getitem_node is None
+            getitem_node = n
+    assert conv_node is not None
+    assert bn_node is not None
+    assert getitem_node is not None
+    return (conv_node, bn_node, getitem_node)
+
 def _fuse_conv_bn_qat(m: GraphModule) -> GraphModule:
     """
     Given a graph of decomposed aten ops, replace the (conv + bn) pattern with
@@ -305,28 +330,8 @@ def _fuse_conv_bn_qat(m: GraphModule) -> GraphModule:
     # For more detail, see https://github.com/pytorch/pytorch/issues/100419.
 
     for r in replacements_with_conv_bias + replacements_no_conv_bias:
-        replacement_conv_node = None
-        replacement_bn_node = None
-        for replacement in r.replacements:
-            if (
-                replacement.op == "call_function"
-                and replacement.target == torch.ops.aten.convolution.default
-            ):
-                replacement_conv_node = replacement
-            elif (
-                replacement.op == "call_function"
-                and replacement.target == torch.ops.aten._native_batch_norm_legit.default
-            ):
-                replacement_bn_node = replacement
-            elif (
-                replacement.op == "call_function"
-                and replacement.target == operator.getitem
-            ):
-                replacement_getitem_node = replacement
-
-        assert replacement_conv_node is not None
-        assert replacement_bn_node is not None
-        assert replacement_getitem_node is not None
+        (replacement_conv_node, replacement_bn_node, replacement_getitem_node) =\
+            _get_conv_bn_getitem_nodes(r.replacements)
 
         # Copy over metadata for all three nodes in [conv - bn - getitem]
         # Also copy over constant args for conv
@@ -396,37 +401,26 @@ def _fold_conv_bn_qat(m: GraphModule) -> GraphModule:
             n.target = torch.ops.quantized_decomposed.dequantize_per_tensor
 
     replacement_pattern = _get_aten_graph_module(_folded_quantized_qat_conv2d_bn_pattern, example_inputs)
-    match_and_replacement = replace_pattern_with_filters(
+    replacements = replace_pattern_with_filters(
         m, match_pattern, replacement_pattern, match_filters=[], ignore_literals=True
     )
     m.recompile()
 
-    for mr in match_and_replacement:
-        # Find replacement conv and bn nodes by climbing upwards from anchor node
-        assert len(mr.replacements) == 1, "expected only one replacement node"
+    for r in replacements:
+        (conv_node, bn_node, _) = _get_conv_bn_getitem_nodes(r.replacements)
 
-        # find conv, bn, weight, bias nodes in the graph
-        replacement_quantize_node = mr.replacements[0]
-        assert replacement_quantize_node.target == torch.ops.quantized_decomposed.quantize_per_tensor.tensor
-        n = replacement_quantize_node
-        conv_node = None
-        bn_node = None
-        while conv_node is None or bn_node is None:
-            if n.target == torch.ops.aten.convolution.default:
-                conv_node = n
-            if n.target == torch.ops.aten._native_batch_norm_legit.default:
-                bn_node = n
-            assert isinstance(n.args[0], Node)
-            n = n.args[0]
-        assert conv_node is not None and bn_node is not None
-
+        # get conv weight and bias
         conv_weight_dq = conv_node.args[1]
+        assert isinstance(conv_weight_dq, Node)
         assert conv_weight_dq.target == torch.ops.quantized_decomposed.dequantize_per_tensor.tensor
         conv_weight_q = conv_weight_dq.args[0]
+        assert isinstance(conv_weight_q, Node)
         assert conv_weight_q.target == torch.ops.quantized_decomposed.quantize_per_tensor.tensor
         conv_weight = conv_weight_q.args[0]
+        assert isinstance(conv_weight, Node)
         assert conv_weight.op == "get_attr"
         conv_bias = conv_node.args[2]
+        assert isinstance(conv_bias, Node)
 
         # fold bn weights into conv
         _fold_bn_weights_into_conv_node(conv_node, conv_weight, conv_bias, bn_node, m)
