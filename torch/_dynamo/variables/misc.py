@@ -702,6 +702,16 @@ class SkipFilesVariable(VariableTracker):
                 unimplemented(f"functools.wraps({fn})")
 
             return variables.LambdaVariable(wraps, **options)
+        elif self.value is collections.deque and not kwargs:
+            if len(args) == 0:
+                items = []
+            elif len(args) == 1:
+                items = args[0].items
+            else:
+                unimplemented("deque() with more than 1 arg not supported by dynamo")
+            return variables.lists.DequeVariable(
+                items, mutable_local=MutableLocal(), **options
+            )
         else:
             try:
                 path = inspect.getfile(self.value)
