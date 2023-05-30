@@ -10405,6 +10405,8 @@ class TestConsistency(TestCaseMPS):
         'nn.functional.triplet_margin_loss',
         'nn.functional.triplet_margin_with_distance_loss',
         'round', 'xlogy',
+        '_native_batch_norm_legit',
+        'native_batch_norm', 
 
         # for macOS 12
         'masked.normalize', 'masked.sum', 'masked.var',
