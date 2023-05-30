@@ -51,6 +51,9 @@ class DummyModule(object):
     def is_available():
         return True
 
+    @staticmethod
+    def current_device():
+        return 0
 
 @unittest.skipIf(IS_ARM64, "Does not work on arm")
 class TestCppExtensionOpenRgistration(common.TestCase):
@@ -340,6 +343,15 @@ class TestCppExtensionOpenRgistration(common.TestCase):
             with self.assertRaisesRegex(RuntimeError, 'Overflow'):
                 foo_storage.resize_(8**29)
 
+        def test_open_device_faketensor():
+            torch.utils.rename_privateuse1_backend('foo')
+            # register foo module, torch.foo
+            torch._register_device_module('foo', DummyModule)
+            with torch._subclasses.fake_tensor.FakeTensorMode.push():
+                a = torch.empty(1, device="foo")
+                b = torch.empty(1, device="foo:0")
+                result = a + b
+
         test_base_device_registration()
         test_before_common_registration()
         test_common_registration()
@@ -352,6 +364,7 @@ class TestCppExtensionOpenRgistration(common.TestCase):
         test_open_device_storage_pin_memory()
         test_open_device_serialization()
         test_open_device_storage_resize()
+        test_open_device_faketensor()
 
 
 if __name__ == "__main__":
