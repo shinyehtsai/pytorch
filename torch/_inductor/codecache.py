@@ -3,6 +3,7 @@ import dataclasses
 import functools
 import getpass
 import hashlib
+import importlib
 import json
 import logging
 import multiprocessing
@@ -783,6 +784,69 @@ class PyCodeCache:
             ]
 
         return parse_stack_trace(entry.stack_trace)
+
+
+class CppWrapperCodeCache:
+    cache = dict()
+    clear = staticmethod(cache.clear)
+
+    @classmethod
+    def load(cls, source_code, func_name, key, cuda):
+        cpp_wrapper_dir = os.path.join(cache_dir(), "cpp_wrapper")
+        if not os.path.exists(cpp_wrapper_dir):
+            os.makedirs(cpp_wrapper_dir)
+
+        name = f"inline_extension_{key}"
+        EXT = "so"
+        filepath = os.path.join(cpp_wrapper_dir, f"{name}.{EXT}")
+        log.debug("Cpp wrapper code path %s", filepath)
+
+        if key not in cls.cache:
+            log.debug("Cpp wrapper cache miss for %s", filepath)
+            from filelock import FileLock
+
+            lock_dir = get_lock_dir()
+            lock = FileLock(os.path.join(lock_dir, key + ".lock"), timeout=LOCK_TIMEOUT)
+            with lock:
+                if not os.path.exists(filepath):
+                    log.debug("Cpp wrapper building %s", filepath)
+
+                    _cpp_flags = cpp_flags()
+                    _opt_flags = optimization_flags()
+                    _shared = get_shared()
+                    _warning_all_flag = get_warning_all_flag()
+                    _ipaths, _lpaths, _libs, _macros = get_include_and_linking_paths(
+                        vec_isa=pick_vec_isa(),
+                        cuda=cuda,
+                    )
+                    _use_custom_generated_macros = use_custom_generated_macros()
+
+                    extra_cflags = f"{_cpp_flags} {_opt_flags} {_warning_all_flag} {_macros} {_use_custom_generated_macros}"
+                    extra_ldflags = f"{_shared} {_lpaths} {_libs}"
+                    extra_include_paths = f"{_ipaths}"
+
+                    mod = torch.utils.cpp_extension.load_inline(
+                        name=name,
+                        build_directory=cpp_wrapper_dir,
+                        cpp_sources=[source_code],
+                        functions=[func_name],
+                        extra_cflags=[extra_cflags],
+                        extra_ldflags=[extra_ldflags],
+                        extra_include_paths=[extra_include_paths],
+                    )
+                    log.debug("Cpp wrapper done building %s", filepath)
+                else:
+                    log.debug("Found target .so, cpp wrapper loading %s", filepath)
+                    spec = importlib.util.spec_from_file_location(name, filepath)
+                    assert spec is not None
+                    mod = importlib.util.module_from_spec(spec)
+                    assert isinstance(spec.loader, importlib.abc.Loader)
+                    spec.loader.exec_module(mod)
+                    log.debug("Cpp wrapper done loading %s", filepath)
+
+                cls.cache[key] = mod
+
+        return cls.cache[key]
 
 
 class TritonCodeCache:
