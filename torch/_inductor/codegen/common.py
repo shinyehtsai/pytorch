@@ -49,7 +49,7 @@ class OpDtypeClassifier:
     @staticmethod
     @functools.lru_cache(None)
     def io_ops():
-        return ["placeholder", "output"]
+        return ["placeholder"]
 
     @staticmethod
     @functools.lru_cache(None)
@@ -93,10 +93,18 @@ class OpDtypeClassifier:
     def rand_ops():
         return ["rand", "randn"]
 
+    @staticmethod
+    @functools.lru_cache(None)
+    def with_subblock_ops():
+        return ["masked_subblock"]
+
 
 class DataTypePropagation:
-    def __init__(self, graph: torch.fx.Graph) -> None:
-        self.graph: torch.fx.Graph = graph
+    def __init__(self, body) -> None:
+        self.body = body
+        self.graphs = {"root": body.root_block.graph}
+        for k, v in body.subblocks.items():
+            self.graphs[k] = v.graph
 
     def deduce_node_dtype_by_inputs(self, node: torch.fx.Node):
         inputs = node.all_input_nodes
@@ -120,6 +128,10 @@ class DataTypePropagation:
             torch.promote_types,
             [n.meta[OptimizationContext.key].dtype for n in input_nodes],
         )
+
+    def deduce_node_dtype_by_subgraph(self, node: torch.fx.Node):
+        sub_graph = self.graphs[node.target]
+        return self.propagate_graph(sub_graph)
 
     def deduce_node_dtype(self, node: torch.fx.Node):
         if node.target in OpDtypeClassifier.boolean_ops():
@@ -145,10 +157,15 @@ class DataTypePropagation:
             _, _, dtype, _, _, _, _ = node.args
             return dtype
 
+        if any(
+            node.target.startswith(op) for op in OpDtypeClassifier.with_subblock_ops()
+        ):
+            return self.deduce_node_dtype_by_subgraph(node)
+
         return self.deduce_node_dtype_by_inputs(node)
 
-    def propagate(self):
-        for node in self.graph.nodes:
+    def propagate_graph(self, graph: torch.fx.Graph):
+        for node in graph.nodes:
             if OptimizationContext.key in node.meta:
                 opt_ctx = node.meta[OptimizationContext.key]
             else:
@@ -156,10 +173,15 @@ class DataTypePropagation:
 
             opt_ctx.dtype = self.deduce_node_dtype(node)
             node.meta[OptimizationContext.key] = opt_ctx
+        if node.target == "output":
+            return node.meta[OptimizationContext.key].dtype
+
+    def propagate(self):
+        self.propagate_graph(self.graphs["root"])
 
     @classmethod
-    def propagate_graph(cls, graph: torch.fx.Graph):
-        return cls(graph).propagate()
+    def propagate_loopbody(cls, body):
+        return cls(body).propagate()
 
     @classmethod
     def propagate_scheduler_node(cls, node):
@@ -167,11 +189,8 @@ class DataTypePropagation:
         from ..scheduler import SchedulerNode
 
         assert isinstance(node, SchedulerNode)
-        if isinstance(node._body, LoopBody):
-            body: LoopBody = node._body
-            sub_blocks = [body.root_block] + list(body.subblocks.values())
-            for sub_block in sub_blocks:
-                DataTypePropagation.propagate_graph(sub_block.graph)
+        assert isinstance(node._body, LoopBody)
+        DataTypePropagation.propagate_loopbody(node._body)
 
 
 class ExprPrinter(Printer):
@@ -850,13 +869,6 @@ class OptimizationContext:
 
     # Load value as mask
     is_load_as_mask: bool = False
-    # Load bfloat16 value as float32
-    is_load_bf16_as_fp32: bool = False
-    # Store float32 value as bfloat16
-    is_store_fp32_as_bf16: bool = False
-    # do not  need type cast for
-    # for mem copy only node bf16 load -> bf16 store,
-    is_bf16_mem_copy: bool = False
 
     dtype: torch.dtype = None
     ops_name: str = ""
